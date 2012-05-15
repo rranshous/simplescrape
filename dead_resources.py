@@ -8,11 +8,13 @@ scrapes the given URL looking for dead resources on the same domain
 from BeautifulSoup import BeautifulSoup as BS
 from urlparse import urlparse, urljoin
 from multiprocessing import Queue
+import multiprocessing
 from Queue import Empty
 import requests
 from requests import HTTPError
 from collections import namedtuple
 from threading import Thread
+from multiprocessing import Process
 
 Resource = namedtuple('Resource',['url','ref_page'])
 
@@ -70,14 +72,15 @@ def get_soup_images(url,soup):
         yield img_src
 
 class Threadify(type):
+    thread_class = Thread
     def __new__(cls, name, bases, dct):
         # add thread to base classes
         print 'DCT: %s' % dct
-        bases = bases + (Thread,)
+        bases = bases + (cls.thread_class,)
         original_init = dct.get('__init__')
         if not original_init and len(bases) == 2:
             # TODO: use the python protocol for finding
-            #       attrs to get init instead of using base 0
+            #       attrs to get init instead of using bases0
             original_init = bases[0].__init__
         # what function is the target for the thread ?
         target_str = dct.get('_thread_target')
@@ -85,7 +88,7 @@ class Threadify(type):
         # setup new init which init's thread
         def __init__(self, *args, **kwargs):
             original_init(self, *args, **kwargs)
-            Thread.__init__(self)
+            cls.thread_class.__init__(self)
         dct['__init__'] = __init__
         # pull out target method
         to_run = dct.get(target_str)
@@ -108,6 +111,59 @@ class Threadify(type):
         # add in our run method
         dct['run'] = run
         return super(Threadify, cls).__new__(cls, name, bases, dct)
+class Processify(Threadify):
+    thread_class = Process
+
+class Pool(object):
+    def __init__(self, cls, args=[], kwargs={}, count=10):
+        self.cls = cls
+        self.count = count
+        self.args = args
+        self.kwargs = kwargs
+        self.items = []
+        self._populate()
+
+    def _populate(self):
+        root_item = self.cls(*self.args, **self.kwargs)
+        self.items.append(root_item)
+        # figure out which attrs are queue's
+        queue_attrs = {}
+        for attr in dir(root_item):
+            v = getattr(root_item, attr)
+            if v and v.__class__ == multiprocessing.queues.Queue:
+                queue_attrs[attr] = v
+        for i in xrange(self.count - 1):
+            item = self.cls(*self.args, **self.kwargs)
+            for attr, q in queue_attrs.iteritems():
+                setattr(item, attr, q)
+            self.items.append(item)
+        return root_item
+
+    def __getattr__(self, attr):
+        if self.items and hasattr(self.items[0],attr):
+            if callable(getattr(self.items[0],attr)):
+                def call_all(*args, **kwargs):
+                    r = []
+                    for item in self.items:
+                        v = getattr(item,attr)
+                        r.append(v(*args, **kwargs))
+                    return r
+                return call_all
+            else:
+                return [getattr(i,v) for i in items]
+        else:
+            raise AttributeError
+
+    def start(self):
+        # make one
+        for item in self.items:
+            item.start()
+        return True
+
+    def join(self):
+        for item in self.items:
+            item.join()
+        return True
 
 
 class Scraper(object):
@@ -163,6 +219,10 @@ class ScraperThread(Scraper):
     __metaclass__ = Threadify
     _thread_target = 'scrape'
 
+class ScraperProcess(Scraper):
+    __metaclass__ = Processify
+    _thread_target = 'scrape'
+
 class ResourceFinder(object):
     def __init__(self, root_url):
         self.root_url = root_url
@@ -206,6 +266,10 @@ class ResourceFinderThread(ResourceFinder):
     __metaclass__ = Threadify
     _thread_target = 'find'
 
+class ResourceFinderProcess(ResourceFinder):
+    __metaclass__ = Processify
+    _thread_target = 'find'
+
 class Verifier(object):
     def __init__(self, root_url):
         self.root_url = root_url
@@ -239,6 +303,10 @@ class Verifier(object):
 
 class VerifierThread(Verifier):
     __metaclass__ = Threadify
+    _thread_target = 'verify'
+
+class VerifierProcess(Verifier):
+    __metaclass__ = Processify
     _thread_target = 'verify'
 
 def run(root_url):
@@ -301,14 +369,55 @@ def run_threaded(root_url):
 
     return verifier
 
+def run_processed(root_url, count=10):
+    # setup our scraper, will find all the pages
+    # and the links on the site
+    scrapers = Pool(ScraperProcess,(root_url,))
+    root_scraper = scrapers.items[0]
+
+    # resource finder looks at the urls and finds all the
+    # resources it links to
+    finders = Pool(ResourceFinderProcess,(root_url,))
+    root_finder = finders.items[0]
+    root_finder.page_url_queue = root_scraper.found_links_queue
+
+    # the verifier checks the resources to make sure they exist
+    verifiers = Pool(VerifierProcess, (root_url,))
+    root_verifier = verifiers.items[0]
+    root_verifier.unchecked_resource_queue = root_finder.found_resource_queue
+
+    # run our scraper
+    scrapers.scrape()
+
+    # now run our finder
+    finders.find()
+
+    # and now our verifier
+    verifiers.verify()
+
+    # let them run as long as they want
+
+    print 'joining scraper'
+    scrapers.join()
+    print 'joining finder'
+    finders.join()
+    print 'joining verifier'
+    verifiers.join()
+
+    return verifiers[0]
+
 if __name__ == '__main__':
     import sys
     root_url = sys.argv[1]
     print 'target: %s' % root_url
     if 'thread' in sys.argv:
         verifier = run_threaded(root_url)
+    elif 'process' in sys.argv:
+        verifier = run_processed(root_url)
     else:
         verifier = run(root_url)
     print 'REPORT ==============='
-    for resource_url, page_url in iterqueue(verifier.bad_resource_queue,0):
-        print '%s :: %s\n'
+    bad = iterqueue(verifier.bad_resource_queue,0)
+    bad = sorted(bad, key=lambda r: r[1])
+    for resource_url, page_url in bad:
+        print '%s :: %s' % (page_url, resource_url)
