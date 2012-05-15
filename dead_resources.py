@@ -12,6 +12,7 @@ from Queue import Empty
 import requests
 from requests import HTTPError
 from collections import namedtuple
+from threading import Thread
 
 Resource = namedtuple('Resource',['url','ref_page'])
 
@@ -31,7 +32,6 @@ def iterqueue(q, block_time=10):
 
 def url_to_content(url):
     if url in HTTP_CACHE:
-        print 'HTTP CACHE'
         return HTTP_CACHE.get(url)
     try:
         response = requests.get(url)
@@ -46,7 +46,6 @@ def url_to_content(url):
 def url_to_soup(url):
     """ requests url, returns soup """
     if url in SOUP_CACHE:
-        print 'SOUP CACHE'
         return SOUP_CACHE.get(url)
     html = url_to_content(url)
     if html is None:
@@ -70,6 +69,45 @@ def get_soup_images(url,soup):
         img_src = urljoin(url, img.get('src'))
         yield img_src
 
+class Threadify(type):
+    def __new__(cls, name, bases, dct):
+        # add thread to base classes
+        print 'DCT: %s' % dct
+        bases = bases + (Thread,)
+        original_init = dct.get('__init__')
+        if not original_init and len(bases) == 2:
+            # TODO: use the python protocol for finding
+            #       attrs to get init instead of using base 0
+            original_init = bases[0].__init__
+        # what function is the target for the thread ?
+        target_str = dct.get('_thread_target')
+        assert target_str, "must define run target"
+        # setup new init which init's thread
+        def __init__(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            Thread.__init__(self)
+        dct['__init__'] = __init__
+        # pull out target method
+        to_run = dct.get(target_str)
+        if not to_run and len(bases) == 2:
+            # TODO: use protocol not bases0
+            to_run = getattr(bases[0],target_str)
+        # setup function which will replace old target
+        # and starts the thread instead
+        def call_start(self, *args, **kwargs):
+            print 'starting: %s' % name
+            self._run_args = args
+            self._run_kwargs = kwargs
+            self.start()
+        # set our new start caller as the target
+        dct[target_str] = call_start
+        # setup a run method which just calls our
+        # original target method
+        def run(self):
+            to_run(self, *self._run_args, **self._run_kwargs)
+        # add in our run method
+        dct['run'] = run
+        return super(Threadify, cls).__new__(cls, name, bases, dct)
 
 
 class Scraper(object):
@@ -121,6 +159,9 @@ class Scraper(object):
                         self.found_links_queue.put(href)
                         self.seen.add(href)
 
+class ScraperThread(Scraper):
+    __metaclass__ = Threadify
+    _thread_target = 'scrape'
 
 class ResourceFinder(object):
     def __init__(self, root_url):
@@ -147,20 +188,23 @@ class ResourceFinder(object):
             return False
 
         # find all the images / links
-        for url in get_soup_images(self.root_url, soup):
+        for url in get_soup_images(page_url, soup):
             if url not in self.seen:
                 print 'found: %s => %s' % (page_url, url)
                 r = Resource(url, page_url)
                 self.found_resource_queue.put(r)
                 self.seen.add(url)
 
-        for url in get_soup_links(self.root_url, soup):
+        for url in get_soup_links(page_url, soup):
             if url not in self.seen:
                 print 'found: %s => %s' % (page_url, url)
                 r = Resource(url, page_url)
                 self.found_resource_queue.put(r)
                 self.seen.add(url)
 
+class ResourceFinderThread(ResourceFinder):
+    __metaclass__ = Threadify
+    _thread_target = 'find'
 
 class Verifier(object):
     def __init__(self, root_url):
@@ -193,6 +237,9 @@ class Verifier(object):
                 r = Resource(url, ref_page)
                 self.bad_resource_queue.put(r)
 
+class VerifierThread(Verifier):
+    __metaclass__ = Threadify
+    _thread_target = 'verify'
 
 def run(root_url):
 
@@ -219,3 +266,49 @@ def run(root_url):
     verifier.verify()
 
     return verifier
+
+def run_threaded(root_url):
+    # setup our scraper, will find all the pages
+    # and the links on the site
+    scraper = ScraperThread(root_url)
+
+    # resource finder looks at the urls and finds all the
+    # resources it links to
+    finder = ResourceFinderThread(root_url)
+    finder.page_url_queue = scraper.found_links_queue
+
+    # the verifier checks the resources to make sure they exist
+    verifier = VerifierThread(root_url)
+    verifier.unchecked_resource_queue = finder.found_resource_queue
+
+    # run our scraper
+    scraper.scrape()
+
+    # now run our finder
+    finder.find()
+
+    # and now our verifier
+    verifier.verify()
+
+    # let them run as long as they want
+
+    print 'joining scraper'
+    scraper.join()
+    print 'joining finder'
+    finder.join()
+    print 'joining verifier'
+    verifier.join()
+
+    return verifier
+
+if __name__ == '__main__':
+    import sys
+    root_url = sys.argv[1]
+    print 'target: %s' % root_url
+    if 'thread' in sys.argv:
+        verifier = run_threaded(root_url)
+    else:
+        verifier = run(root_url)
+    print 'REPORT ==============='
+    for resource_url, page_url in iterqueue(verifier.bad_resource_queue,0):
+        print '%s :: %s\n'
