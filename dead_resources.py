@@ -4,12 +4,21 @@
 scrapes the given URL looking for dead resources on the same domain
 """
 
+
 from BeautifulSoup import BeautifulSoup as BS
 from urlparse import urlparse, urljoin
 from multiprocessing import Queue
 from Queue import Empty
 import requests
 from requests import HTTPError
+from collections import namedtuple
+
+Resource = namedtuple('Resource',['url','ref_page'])
+
+# lookup of http responses
+HTTP_CACHE = {}
+# lookup of soups
+SOUP_CACHE = {}
 
 def iterqueue(q, block_time=10):
     """ yields up items in queue """
@@ -21,20 +30,30 @@ def iterqueue(q, block_time=10):
         yield v
 
 def url_to_content(url):
+    if url in HTTP_CACHE:
+        print 'HTTP CACHE'
+        return HTTP_CACHE.get(url)
     try:
         response = requests.get(url)
         response.raise_for_status()
     except (HTTPError, Exception), ex:
         print 'exception getting url content: %s' % ex
+        HTTP_CACHE[url] = None
         return None
+    HTTP_CACHE[url] = response.content
     return response.content
 
 def url_to_soup(url):
     """ requests url, returns soup """
+    if url in SOUP_CACHE:
+        print 'SOUP CACHE'
+        return SOUP_CACHE.get(url)
     html = url_to_content(url)
     if html is None:
-        return html
+        SOUP_CACHE[url] = None
+        return None
     soup = BS(html)
+    SOUP_CACHE[url] = soup
     return soup
 
 def off_root(root_url, url):
@@ -117,12 +136,12 @@ class ResourceFinder(object):
         for url in iterqueue(self.page_url_queue):
             self._find(url)
 
-    def _find(self, url):
+    def _find(self, page_url):
 
-        print 'finding: %s' % url
+        print 'finding: %s' % page_url
 
         # get the pages soup
-        soup = url_to_soup(url)
+        soup = url_to_soup(page_url)
 
         if not soup:
             return False
@@ -130,14 +149,16 @@ class ResourceFinder(object):
         # find all the images / links
         for url in get_soup_images(self.root_url, soup):
             if url not in self.seen:
-                print 'found: %s' % url
-                self.found_resource_queue.put(url)
+                print 'found: %s => %s' % (page_url, url)
+                r = Resource(url, page_url)
+                self.found_resource_queue.put(r)
                 self.seen.add(url)
 
         for url in get_soup_links(self.root_url, soup):
             if url not in self.seen:
-                print 'found: %s' % url
-                self.found_resource_queue.put(url)
+                print 'found: %s => %s' % (page_url, url)
+                r = Resource(url, page_url)
+                self.found_resource_queue.put(r)
                 self.seen.add(url)
 
 
@@ -153,22 +174,24 @@ class Verifier(object):
 
         # go through our resources
         print 'VERIFYING'
-        for url in iterqueue(self.unchecked_resource_queue):
+        for url, ref_page in iterqueue(self.unchecked_resource_queue):
             if url not in self.seen:
-                self._verify(url)
+                self._verify(url, ref_page)
                 self.seen.add(url)
 
-    def _verify(self, url):
+    def _verify(self, url, ref_page):
             # see if we can get the resource
             resource = url_to_content(url)
 
             # if we got the resource, it's good
             if resource and len(resource):
                 print 'verified good: %s' % url
-                self.good_resource_queue.put(url)
+                r = Resource(url, ref_page)
+                self.good_resource_queue.put(r)
             else:
                 print 'verified bad: %s' % url
-                self.bad_resource_queue.put(url)
+                r = Resource(url, ref_page)
+                self.bad_resource_queue.put(r)
 
 
 def run(root_url):
