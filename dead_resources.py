@@ -37,7 +37,7 @@ def url_to_content(url):
         response = requests.get(url)
         response.raise_for_status()
     except (HTTPError, Exception), ex:
-        print 'exception getting url content: %s' % ex
+        print 'exception getting url content [%s]: %s' % (url,ex)
         HTTP_CACHE[url] = None
         return None
     HTTP_CACHE[url] = response.content
@@ -51,7 +51,11 @@ def url_to_soup(url):
     if html is None:
         SOUP_CACHE[url] = None
         return None
-    soup = BS(html)
+    try:
+        soup = BS(html)
+    except Exception, ex:
+        print 'exception creating soup [%s]: %s' % (url,ex)
+        return None
     SOUP_CACHE[url] = soup
     return soup
 
@@ -310,5 +314,6 @@ if __name__ == '__main__':
     else:
         verifier = run(root_url)
     print 'REPORT ==============='
-    for resource_url, page_url in iterqueue(verifier.bad_resource_queue,0):
-        print '%s :: %s\n'
+    resources = sorted(iterqueue(verifier.bad_resource_queue,0), key=lambda r: r[1])
+    for resource_url, page_url in resources:
+        print '%s :: %s\n' % (page_url, resource_url)
