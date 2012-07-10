@@ -12,7 +12,7 @@ setup(
     version=dead_resources.__version__,
     author="Robby Ranshous",
     author_email="rranshous@gmail.com",
-    description="simple dead resource finder"
+    description="simple dead resource finder",
     keywords="scraping",
     url="https://github.com/rranshous/simplescrape",
     py_modules=["dead_resources.py"],
@@ -21,7 +21,6 @@ setup(
         "Topic :: Utilities",
         "Programming Language :: Python :: 2.6",
         "Programming Language :: Python :: 2.7",
-        "Programming Language :: Python :: 3.2",
     ],
     install_requires=requirements,
 )
