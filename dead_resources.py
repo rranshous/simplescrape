@@ -16,6 +16,10 @@ from collections import namedtuple
 from threading import Thread
 from multiprocessing import Process
 
+version_info = (0, 0, 1)
+__version__ = '.'.join(map(str, version_info))
+version = __version__
+
 Resource = namedtuple('Resource',['url','ref_page'])
 
 # lookup of http responses
