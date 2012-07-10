@@ -15,7 +15,7 @@ setup(
     description="simple dead resource finder",
     keywords="scraping",
     url="https://github.com/rranshous/simplescrape",
-    py_modules=["dead_resources.py"],
+    py_modules=["dead_resources"],
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Topic :: Utilities",
