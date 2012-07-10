@@ -4,7 +4,7 @@
 scrapes the given URL looking for dead resources on the same domain
 """
 
-
+from time import sleep
 from BeautifulSoup import BeautifulSoup as BS
 from urlparse import urlparse, urljoin
 from multiprocessing import Queue
@@ -131,6 +131,8 @@ class Pool(object):
         for attr in dir(root_item):
             v = getattr(root_item, attr)
             if v and v.__class__ == multiprocessing.queues.Queue:
+                queue_attrs[attr] = v
+            elif v and type(v) == set:
                 queue_attrs[attr] = v
         for i in xrange(self.count - 1):
             item = self.cls(*self.args, **self.kwargs)
@@ -338,38 +340,48 @@ def run(root_url):
 def run_threaded(root_url):
     # setup our scraper, will find all the pages
     # and the links on the site
-    scraper = ScraperThread(root_url)
+    scrapers = Pool(ScraperProcess,(root_url,))
+    root_scraper = scrapers.items[0]
 
     # resource finder looks at the urls and finds all the
     # resources it links to
-    finder = ResourceFinderThread(root_url)
-    finder.page_url_queue = scraper.found_links_queue
+    finders = Pool(ResourceFinderProcess,(root_url,))
+    root_finder = finders.items[0]
+    root_finder.page_url_queue = root_scraper.found_links_queue
 
     # the verifier checks the resources to make sure they exist
-    verifier = VerifierThread(root_url)
-    verifier.unchecked_resource_queue = finder.found_resource_queue
+    verifiers = Pool(VerifierProcess, (root_url,))
+    root_verifier = verifiers.items[0]
+    root_verifier.unchecked_resource_queue = root_finder.found_resource_queue
+
+    sleep(10)
 
     # run our scraper
-    scraper.scrape()
+    scrapers.scrape()
 
     # now run our finder
-    finder.find()
+    finders.find()
 
     # and now our verifier
-    verifier.verify()
+    verifiers.verify()
 
     # let them run as long as they want
 
     print 'joining scraper'
-    scraper.join()
+    scrapers.join()
     print 'joining finder'
-    finder.join()
+    finders.join()
     print 'joining verifier'
-    verifier.join()
+    verifiers.join()
 
-    return verifier
+    return verifiers[0]
 
 def run_processed(root_url, count=10):
+
+    ### THIS HAS A PROBLEM
+    # since each is in it's own proc they dont share
+    # the seen set
+
     # setup our scraper, will find all the pages
     # and the links on the site
     scrapers = Pool(ScraperProcess,(root_url,))
